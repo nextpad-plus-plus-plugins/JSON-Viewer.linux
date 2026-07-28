@@ -31,6 +31,14 @@ enum {
 // Sentinel stored in COL_LABEL of lazy placeholder rows.
 static const char* kPlaceholder = "__jv_placeholder__";
 
+// Env-gated diagnostics (NPP_JV_DEBUG=1) — the project's standard gated-trace
+// pattern; costs one g_getenv per event when off.
+static bool jvDebug() {
+    static int on = -1;
+    if (on < 0) on = g_getenv("NPP_JV_DEBUG") ? 1 : 0;
+    return on == 1;
+}
+
 // Semantic per-type colors — near equivalents of the macOS system colors,
 // picked to stay readable on both light and dark themes.
 static const char* colorForType(npj::JsonNodeType t) {
@@ -115,6 +123,20 @@ void JsonPanel::buildLayout(const std::string& resourcesDir) {
     gtk_tree_view_set_enable_tree_lines(GTK_TREE_VIEW(m_tree), TRUE);
     gtk_tree_view_set_enable_search(GTK_TREE_VIEW(m_tree), FALSE);  // our own search field
 
+    // Narrow SPACER column 0 (NextZip 30b8a8c fix): the host's dock GtkPaned
+    // separator has an enlarged (~14px) invisible grab zone that swallows
+    // clicks along a docked panel's LEFT EDGE — measured here: presses at
+    // tree x≤~16 never reach the view, which put the DEPTH-0 expander arrow
+    // inside the dead strip (root collapsed once → arrow unclickable → the
+    // user-reported "can no longer expand JSON"). The spacer pushes the
+    // expander right of the theft zone; row backgrounds and the selection
+    // highlight still span the full width. NOT a widget margin — a margin
+    // leaves a background strip and an inset selection.
+    GtkTreeViewColumn* spacer = gtk_tree_view_column_new();
+    gtk_tree_view_column_set_sizing(spacer, GTK_TREE_VIEW_COLUMN_FIXED);
+    gtk_tree_view_column_set_fixed_width(spacer, 18);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(m_tree), spacer);
+
     GtkCellRenderer* r = gtk_cell_renderer_text_new();
     g_object_set(r, "ellipsize", PANGO_ELLIPSIZE_MIDDLE, NULL);
     GtkTreeViewColumn* col = gtk_tree_view_column_new_with_attributes(
@@ -124,6 +146,7 @@ void JsonPanel::buildLayout(const std::string& resourcesDir) {
         "foreground-set", COL_FG_SET,
         NULL);
     gtk_tree_view_append_column(GTK_TREE_VIEW(m_tree), col);
+    gtk_tree_view_set_expander_column(GTK_TREE_VIEW(m_tree), col);
 
     // ~10pt rows like the macOS panel's default font size.
     GtkCssProvider* css = gtk_css_provider_new();
@@ -134,6 +157,76 @@ void JsonPanel::buildLayout(const std::string& resourcesDir) {
     g_object_unref(css);
 
     g_signal_connect(m_tree, "test-expand-row", G_CALLBACK(onTestExpandRow), this);
+
+    // OWN the expander-gutter clicks (NextZip pattern, verbatim rationale):
+    // GTK4's deprecated GtkTreeView has a narrow, flaky native arrow hit
+    // path — measured here: after a row is collapsed, arrow clicks stop
+    // reaching real_expand_row entirely (no test-expand-row fires; the
+    // arrow_prelit/IS_PARENT gate goes stale), so a collapsed root could
+    // NEVER be re-expanded by mouse. Programmatic expand/collapse always
+    // works, so a capture-phase press gesture toggles the row itself for
+    // any click left of the cell content and CLAIMS the sequence so the
+    // native handling can't interfere or double-toggle.
+    GtkGesture* gutter = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(gutter), GDK_BUTTON_PRIMARY);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(gutter),
+                                               GTK_PHASE_CAPTURE);
+    g_signal_connect(gutter, "pressed",
+        G_CALLBACK(+[](GtkGestureClick* g, int nPress, double x, double y, gpointer selfp) {
+            JsonPanel* self = (JsonPanel*)selfp;
+            GtkTreeView* tv = GTK_TREE_VIEW(self->m_tree);
+            // (no comma-declarations in a G_CALLBACK lambda — macro trap)
+            int bx = 0;
+            int by = 0;
+            gtk_tree_view_convert_widget_to_bin_window_coords(tv, (int)x, (int)y, &bx, &by);
+            if (jvDebug())
+                g_message("jv: gutter-press x=%.0f y=%.0f bx=%d by=%d", x, y, bx, by);
+            GtkTreePath* path = nullptr;
+            if (!gtk_tree_view_get_path_at_pos(tv, bx, by, &path, nullptr, nullptr, nullptr))
+                return;
+            // get_cell_area excludes the expander area, so cell.x is the
+            // gutter's exact right edge.
+            GdkRectangle cell = {};
+            gtk_tree_view_get_cell_area(tv, path,
+                gtk_tree_view_get_expander_column(tv), &cell);
+            if (bx < cell.x) {
+                GtkTreeIter it;
+                if (nPress == 1 &&
+                    gtk_tree_model_get_iter(GTK_TREE_MODEL(self->m_store), &it, path) &&
+                    gtk_tree_model_iter_has_child(GTK_TREE_MODEL(self->m_store), &it)) {
+                    if (gtk_tree_view_row_expanded(tv, path))
+                        gtk_tree_view_collapse_row(tv, path);
+                    else
+                        gtk_tree_view_expand_row(tv, path, FALSE);
+                    if (jvDebug()) {
+                        gchar* ps = gtk_tree_path_to_string(path);
+                        g_message("jv: gutter toggle %s -> expanded=%d",
+                                  ps ? ps : "?",
+                                  gtk_tree_view_row_expanded(tv, path));
+                        g_free(ps);
+                    }
+                }
+                // Claim every gutter press (incl. n_press>1) so the native
+                // narrow-expander handling can't double-toggle.
+                gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+            }
+            gtk_tree_path_free(path);
+        }), this);
+    gtk_widget_add_controller(m_tree, GTK_EVENT_CONTROLLER(gutter));
+    if (jvDebug()) {
+        g_signal_connect(m_tree, "row-expanded",
+            G_CALLBACK(+[](GtkTreeView*, GtkTreeIter*, GtkTreePath* p, gpointer) {
+                gchar* ps = gtk_tree_path_to_string(p);
+                g_message("jv: row-expanded %s", ps ? ps : "?");
+                g_free(ps);
+            }), nullptr);
+        g_signal_connect(m_tree, "row-collapsed",
+            G_CALLBACK(+[](GtkTreeView*, GtkTreeIter*, GtkTreePath* p, gpointer) {
+                gchar* ps = gtk_tree_path_to_string(p);
+                g_message("jv: row-collapsed %s", ps ? ps : "?");
+                g_free(ps);
+            }), nullptr);
+    }
 
     // Single left-click → jump to node (macOS outline action semantics:
     // click only, so arrow-keying the tree never steals editor focus).
@@ -361,10 +454,16 @@ void JsonPanel::rebuildStore() {
 
 // ─── lazy expansion ─────────────────────────────────────────────────────────
 
-gboolean JsonPanel::onTestExpandRow(GtkTreeView*, GtkTreeIter* iter, GtkTreePath*,
+gboolean JsonPanel::onTestExpandRow(GtkTreeView*, GtkTreeIter* iter, GtkTreePath* path,
                                     gpointer selfp) {
     JsonPanel* self = (JsonPanel*)selfp;
     GtkTreeModel* model = GTK_TREE_MODEL(self->m_store);
+
+    if (jvDebug()) {
+        gchar* ps = gtk_tree_path_to_string(path);
+        g_message("jv: test-expand-row path=%s", ps ? ps : "?");
+        g_free(ps);
+    }
 
     GtkTreeIter child;
     if (!gtk_tree_model_iter_children(model, &child, iter)) return FALSE;
@@ -456,13 +555,33 @@ void JsonPanel::onRowReleased(GtkGestureClick* g, int, double x, double y, gpoin
     gtk_tree_view_convert_widget_to_bin_window_coords(tv, (int)x, (int)y, &bx, &by);
 
     GtkTreePath* path = nullptr;
-    GtkTreeViewColumn* col = nullptr;
-    if (!gtk_tree_view_get_path_at_pos(tv, bx, by, &path, &col, nullptr, nullptr))
+    if (!gtk_tree_view_get_path_at_pos(tv, bx, by, &path, nullptr, nullptr, nullptr))
         return;
 
-    // Clicks in the expander gutter toggle the row — don't also jump.
+    // Clicks left of the content cell (spacer + expander gutter) toggle the
+    // row — don't also jump. Measured against the EXPANDER column: with the
+    // spacer column present, get_path_at_pos may report the spacer, whose
+    // cell.x is 0.
     GdkRectangle cell = {};
-    gtk_tree_view_get_cell_area(tv, path, col, &cell);
+    gtk_tree_view_get_cell_area(tv, path,
+        gtk_tree_view_get_expander_column(tv), &cell);
+    if (jvDebug()) {
+        gchar* ps = gtk_tree_path_to_string(path);
+        // Root-row state as GTK sees it at click time.
+        GtkTreeModel* m = GTK_TREE_MODEL(self->m_store);
+        GtkTreeIter rootIt;
+        gboolean haveRoot = gtk_tree_model_get_iter_first(m, &rootIt);
+        GtkTreePath* rp = gtk_tree_path_new_first();
+        g_message("jv: released x=%.0f y=%.0f bx=%d cell.x=%d path=%s -> %s | "
+                  "root: has_child=%d n_children=%d expanded=%d",
+                  x, y, bx, cell.x, ps ? ps : "?",
+                  (bx < cell.x) ? "gutter (no jump)" : "row click",
+                  haveRoot ? gtk_tree_model_iter_has_child(m, &rootIt) : -1,
+                  haveRoot ? gtk_tree_model_iter_n_children(m, &rootIt) : -1,
+                  gtk_tree_view_row_expanded(tv, rp));
+        gtk_tree_path_free(rp);
+        g_free(ps);
+    }
     if (bx < cell.x) { gtk_tree_path_free(path); return; }
 
     GtkTreeIter it;

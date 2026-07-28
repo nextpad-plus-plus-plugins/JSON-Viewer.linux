@@ -246,20 +246,25 @@ static void applyJsonLanguage() {
     npp(NPPM_SETBUFFERLANGTYPE, 0, (intptr_t)/*L_JSON=*/57);
 }
 
+// Line where the last-parsed tree's text begins in the document: 0 when the
+// whole document was parsed, the selection's first line when a selection
+// was. Captured by refreshTree() at parse time.
+//
+// DELIBERATE FIX over the macOS port (worth backporting): macOS derives this
+// base from the editor's LIVE selection at CLICK time. TrackingStream
+// positions are relative to the parsed text, so that is only correct until
+// the first click — which itself selects the clicked token, making every
+// subsequent jump offset by the previous one (user-reported: "clicking
+// entries sometimes jumps to wrong lines"). Freezing the base when the tree
+// is built implements the documented intent.
+static std::size_t sTreeBaseLine = 0;
+
 static void jumpEditorToLine(std::size_t line, std::size_t column, std::size_t length) {
     NppHandle h = curScintilla();
     if (!h) return;
 
-    // TrackingStream reported positions relative to the *parsed text*, which
-    // may have been a selection. Offset by the selection start so the
-    // click lands correctly when the JSON was just a piece of the file.
-    std::size_t baseStart = (std::size_t)sci(h, SCI_GETSELECTIONSTART);
-    std::size_t baseEnd   = (std::size_t)sci(h, SCI_GETSELECTIONEND);
-    if (baseEnd < baseStart) std::swap(baseStart, baseEnd);
-    std::size_t base = (baseEnd > baseStart) ? baseStart : 0;
-
-    std::size_t baseLine = (std::size_t)sci(h, SCI_LINEFROMPOSITION, (uintptr_t)base);
-    std::size_t absLine  = baseLine + line;
+    // Resolve line → byte position within the doc, then add column.
+    std::size_t absLine  = sTreeBaseLine + line;
     std::size_t lineStart = (std::size_t)sci(h, SCI_POSITIONFROMLINE, (uintptr_t)absLine);
     std::size_t target   = lineStart + column;
 
@@ -293,6 +298,10 @@ static void refreshTree() {
             "Unable to parse JSON. Please ensure a valid JSON string is selected.");
         return;
     }
+    // Freeze the jump base for THIS parse (see sTreeBaseLine).
+    sTreeBaseLine = s.fromSelection
+        ? (std::size_t)sci(curScintilla(), SCI_LINEFROMPOSITION, (uintptr_t)s.selStart)
+        : 0;
     npj::ParseResult r = npj::parseJson(s.text, npj::toParseOptions(sSettings));
 
     // If plain parse failed AND user has "Replace undefined with null" on,

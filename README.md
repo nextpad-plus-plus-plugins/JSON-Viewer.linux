@@ -48,6 +48,14 @@ layer (panel, settings dialog, bootstrap) was rewritten on GTK4.
 - `NPPM_SETCURRENTLANGTYPE` has no handler on this host — JSON highlighting
   is applied through `NPPM_SETBUFFERLANGTYPE(0, 57)`, which targets the
   current buffer and fires `NPPN_LANGCHANGED`.
+- **Click-to-jump is fixed over macOS** (worth backporting): macOS derives
+  the jump base from the editor's *live* selection at click time, so after
+  the first click (which selects the clicked token) every subsequent jump
+  is offset by it. This port freezes the base when the tree is parsed.
+- The tree keeps an 18 px lead-in column and handles expander-gutter clicks
+  itself: the host's dock-divider grab zone swallows clicks on a docked
+  panel's leftmost ~16 px, which would otherwise make depth-0 expander
+  arrows unclickable.
 
 ## Build
 

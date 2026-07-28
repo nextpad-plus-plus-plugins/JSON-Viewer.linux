@@ -69,6 +69,7 @@ private:
     const npj::JsonNode* selectedNode() const;
     void copyToClipboard(const std::string& s);
     std::string containerLabel(const npj::JsonNode* n) const;
+    void collapseRecursive(GtkTreeIter* iter);
 
     // Signal thunks
     static gboolean onTestExpandRow(GtkTreeView*, GtkTreeIter*, GtkTreePath*, gpointer self);
@@ -84,7 +85,7 @@ private:
     GtkWidget*  m_search      = nullptr;   // GtkSearchEntry
     GtkWidget*  m_tree        = nullptr;   // GtkTreeView
     GtkTreeStore* m_store     = nullptr;
-    GtkWidget*  m_ctxMenu     = nullptr;   // GtkPopoverMenu, parented to m_tree
+    GMenu*      m_ctxModel    = nullptr;   // menu model (popover built per popup)
     GSimpleActionGroup* m_ctxActions = nullptr;
 
     std::unique_ptr<npj::JsonNode> m_treeModel;

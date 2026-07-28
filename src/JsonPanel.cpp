@@ -51,9 +51,9 @@ JsonPanel::JsonPanel(Delegate* delegate, const std::string& resourcesDir)
 }
 
 JsonPanel::~JsonPanel() {
-    if (m_ctxMenu) {
-        gtk_widget_unparent(m_ctxMenu);
-        m_ctxMenu = nullptr;
+    if (m_ctxModel) {
+        g_object_unref(m_ctxModel);
+        m_ctxModel = nullptr;
     }
     if (m_root) {
         g_object_unref(m_root);
@@ -165,7 +165,10 @@ void JsonPanel::buildLayout(const std::string& resourcesDir) {
         g_action_map_add_action(G_ACTION_MAP(m_ctxActions), G_ACTION(a));
         g_object_unref(a);
     }
-    gtk_widget_insert_action_group(m_tree, "jv", G_ACTION_GROUP(m_ctxActions));
+    // On the ROOT, not the treeview: the popover is parented to m_root (see
+    // onRightClick) and action lookup walks up from the popover's parent —
+    // a group on the sibling treeview branch would never be found.
+    gtk_widget_insert_action_group(m_root, "jv", G_ACTION_GROUP(m_ctxActions));
 
     GMenu* menu = g_menu_new();
     GMenu* sec1 = g_menu_new();
@@ -181,11 +184,15 @@ void JsonPanel::buildLayout(const std::string& resourcesDir) {
     g_menu_append(sec3, "Collapse all", "jv.collapse-all");
     g_menu_append_section(menu, nullptr, G_MENU_MODEL(sec3));
 
-    m_ctxMenu = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
-    gtk_widget_set_parent(m_ctxMenu, m_tree);
-    gtk_popover_set_has_arrow(GTK_POPOVER(m_ctxMenu), FALSE);
+    // Keep only the MODEL; the popover widget is created per right-click and
+    // unparented on close (the host npp_menu / NextZip lifecycle). A popover
+    // left permanently parented to the GtkTreeView corrupts the view's row
+    // CSS-node bookkeeping — every session logged one
+    // `gtk_css_node_insert_after: previous_sibling->parent == parent`
+    // CRITICAL at first tree population, and after a Collapse-all the root
+    // row could no longer be expanded (user-reported live).
+    m_ctxModel = menu;
     g_object_unref(sec1); g_object_unref(sec2); g_object_unref(sec3);
-    g_object_unref(menu);
 }
 
 // ─── public API ─────────────────────────────────────────────────────────────
@@ -514,9 +521,36 @@ void JsonPanel::onRightClick(GtkGestureClick* g, int, double x, double y, gpoint
     setEnabled("expand-all",   n && isContainer);
     setEnabled("collapse-all", n && isContainer);
 
-    GdkRectangle r = { (int)x, (int)y, 1, 1 };
-    gtk_popover_set_pointing_to(GTK_POPOVER(self->m_ctxMenu), &r);
-    gtk_popover_popup(GTK_POPOVER(self->m_ctxMenu));
+    // Single-use popover: parent while open, deferred-unparent on close
+    // (unparenting during the "closed" emission breaks GTK's per-window
+    // popover-list walk — same deferral the host and NextZip use).
+    //
+    // Parented to the panel's ROOT BOX, never the GtkTreeView: the view's
+    // row CSS-node bookkeeping assumes it owns its node's children, and a
+    // popover child — even transiently while open — trips one
+    // `gtk_css_node_insert_after` CRITICAL per popup (isolated live:
+    // 0 criticals without right-click, 1 with). The anchor rect is
+    // translated from tree to root coordinates.
+    GtkWidget* pop = gtk_popover_menu_new_from_model(G_MENU_MODEL(self->m_ctxModel));
+    gtk_popover_set_has_arrow(GTK_POPOVER(pop), FALSE);
+    gtk_widget_set_parent(pop, self->m_root);
+    graphene_point_t tp = GRAPHENE_POINT_INIT((float)x, (float)y);
+    graphene_point_t rp;
+    if (!gtk_widget_compute_point(self->m_tree, self->m_root, &tp, &rp))
+        rp = tp;
+    GdkRectangle r = { (int)rp.x, (int)rp.y, 1, 1 };
+    gtk_popover_set_pointing_to(GTK_POPOVER(pop), &r);
+    g_signal_connect(pop, "closed", G_CALLBACK(+[](GtkPopover* p, gpointer) {
+        g_idle_add(+[](gpointer w) -> gboolean {
+            // Ref held below keeps this safe even if the panel is torn down
+            // between close and idle.
+            if (gtk_widget_get_parent(GTK_WIDGET(w)))
+                gtk_widget_unparent(GTK_WIDGET(w));
+            g_object_unref(w);
+            return G_SOURCE_REMOVE;
+        }, g_object_ref(p));
+    }), nullptr);
+    gtk_popover_popup(GTK_POPOVER(pop));
 }
 
 void JsonPanel::copyToClipboard(const std::string& s) {
@@ -559,9 +593,26 @@ void JsonPanel::ctxAction(GSimpleAction* a, GVariant*, gpointer selfp) {
             self->populateEagerly(&it, n);   // materialize pending rows first
             gtk_tree_view_expand_row(GTK_TREE_VIEW(self->m_tree), path, TRUE);
         } else {
+            // macOS collapseItem:collapseChildren:YES collapses the whole
+            // subtree; GTK's collapse_row keeps descendants' expanded flags,
+            // which would restore them on the next expand. Match macOS.
+            self->collapseRecursive(&it);
             gtk_tree_view_collapse_row(GTK_TREE_VIEW(self->m_tree), path);
         }
         gtk_tree_path_free(path);
+    }
+}
+
+void JsonPanel::collapseRecursive(GtkTreeIter* iter) {
+    GtkTreeModel* model = GTK_TREE_MODEL(m_store);
+    GtkTreeIter child;
+    if (gtk_tree_model_iter_children(model, &child, iter)) {
+        do {
+            collapseRecursive(&child);
+            GtkTreePath* p = gtk_tree_model_get_path(model, &child);
+            gtk_tree_view_collapse_row(GTK_TREE_VIEW(m_tree), p);
+            gtk_tree_path_free(p);
+        } while (gtk_tree_model_iter_next(model, &child));
     }
 }
 

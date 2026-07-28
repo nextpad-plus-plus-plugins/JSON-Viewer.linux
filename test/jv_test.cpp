@@ -423,6 +423,49 @@ int main(int argc, char **argv) {
                 "clearing the filter restores the full tree");
     }
 
+    // ── Context-menu actions (the user-reported Collapse-all regression) ──
+    // The popover resolves "jv.*" by walking up from its parent (the panel
+    // root); activating from the treeview walks the same chain, so this
+    // also proves the action group is findable where the popover looks.
+    printf("\n== Context-menu actions: expand-all / collapse-all / re-expand ==\n");
+    setDoc("{\"alpha\":1,\"meta\":{\"zkey\":true},\"tail\":\"x\"}");
+    plug.sendNotif(SCN_MODIFIED, SC_MOD_INSERTTEXT);
+    pumpMs(400);
+    if (model && tv) {
+        GtkTreeView* tview = GTK_TREE_VIEW(tv);
+        GtkTreeIter root;
+        gtk_tree_model_get_iter_first(model, &root);
+        GtkTreeSelection* sel = gtk_tree_view_get_selection(tview);
+        gtk_tree_selection_select_iter(sel, &root);
+
+        check(gtk_widget_activate_action(tv, "jv.expand-all", NULL),
+              "jv.expand-all action resolves from inside the panel");
+        pumpMs(50);
+        GtkTreePath* rootP = gtk_tree_path_new_first();
+        GtkTreePath* metaP = gtk_tree_path_new_from_indices(0, 1, -1);
+        check(gtk_tree_view_row_expanded(tview, metaP),
+              "expand-all expanded the meta subtree");
+
+        check(gtk_widget_activate_action(tv, "jv.collapse-all", NULL),
+              "jv.collapse-all action resolves");
+        pumpMs(50);
+        check(!gtk_tree_view_row_expanded(tview, rootP),
+              "collapse-all collapsed the root");
+
+        // The regression: after Collapse all, the root must expand again.
+        gtk_tree_view_expand_row(tview, rootP, FALSE);
+        pumpMs(50);
+        check(gtk_tree_view_row_expanded(tview, rootP),
+              "root re-expands after Collapse all");
+        checkEq(join(childLabels(model, &root)),
+                "alpha : 1 | meta {1} | tail : \"x\"",
+                "level-1 rows intact after collapse/re-expand");
+        check(!gtk_tree_view_row_expanded(tview, metaP),
+              "children re-appear COLLAPSED (macOS collapseChildren:YES parity)");
+        gtk_tree_path_free(rootP);
+        gtk_tree_path_free(metaP);
+    }
+
     // ── Toggle hides ──────────────────────────────────────────────────────
     printf("\n== Toggle hides the shown panel ==\n");
     cmdToggle();

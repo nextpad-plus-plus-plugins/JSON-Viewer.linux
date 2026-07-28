@@ -245,10 +245,15 @@ void JsonPanel::appendNodeRow(GtkTreeIter* out, GtkTreeIter* parentIter,
     const char* fg = (n == m_treeModel.get()) ? nullptr : colorForType(n->type);
 
     gtk_tree_store_append(m_store, out, parentIter);
+    // Colorless rows store NULL, never "": the "foreground" attribute
+    // binding sets the renderer property for EVERY row regardless of the
+    // foreground-set flag, and GtkCellRendererText parses the string before
+    // checking the flag — "" spams `Gtk-WARNING: Don't know color ''` on
+    // each redraw, while NULL is handled as unset.
     gtk_tree_store_set(m_store, out,
                        COL_LABEL, label.c_str(),
                        COL_NODE, (gpointer)n,
-                       COL_FG, fg ? fg : "",
+                       COL_FG, fg,
                        COL_FG_SET, fg ? TRUE : FALSE,
                        -1);
 
@@ -258,7 +263,7 @@ void JsonPanel::appendNodeRow(GtkTreeIter* out, GtkTreeIter* parentIter,
         gtk_tree_store_set(m_store, &ph,
                            COL_LABEL, kPlaceholder,
                            COL_NODE, nullptr,
-                           COL_FG, "", COL_FG_SET, FALSE,
+                           COL_FG, (const char *)nullptr, COL_FG_SET, FALSE,
                            -1);
     }
 }

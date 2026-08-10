@@ -5,3 +5,4 @@ docs/
 *.so
 *.zip
 .DS_Store
+dist/

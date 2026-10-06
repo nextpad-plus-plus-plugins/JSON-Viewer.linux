@@ -113,6 +113,11 @@ static std::string g_registeredTitle;
 static int         g_showPanelCalls = 0;
 static int         g_hidePanelCalls = 0;
 static int         g_unregisterCalls = 0;
+// Panel-restore metadata capture (GH linux#18): the plugin must declare its
+// reopen command or the host will not restore the panel across a restart.
+static std::string g_panelInfoModule;
+static int         g_panelInfoCmdIndex = -1;
+static int         g_panelInfoCount = 0;
 
 static long mockHostMsg(unsigned int msg, unsigned long wParam, long lParam) {
     switch (msg) {
@@ -133,6 +138,15 @@ static long mockHostMsg(unsigned int msg, unsigned long wParam, long lParam) {
         g_registeredTitle  = wParam ? (const char *)(intptr_t)wParam : "";
         g_registeredPanel  = (GtkWidget *)(intptr_t)lParam;
         return 1;   // handle
+    case NPPM_DMM_SETPANELINFO: {
+        const NppPanelInfo *pi = (const NppPanelInfo *)(intptr_t)lParam;
+        if (pi) {
+            ++g_panelInfoCount;
+            g_panelInfoModule   = pi->moduleName ? pi->moduleName : "";
+            g_panelInfoCmdIndex = pi->cmdIndex;
+        }
+        return 1;
+    }
     case NPPM_DMM_SHOWPANEL:  ++g_showPanelCalls; return 1;
     case NPPM_DMM_HIDEPANEL:  ++g_hidePanelCalls; return 1;
     case NPPM_DMM_UNREGISTERPANEL: ++g_unregisterCalls; return 1;
@@ -334,6 +348,12 @@ int main(int argc, char **argv) {
     check(g_registeredPanel != nullptr, "NPPM_DMM_REGISTERPANEL received a widget (lParam)");
     checkEq(g_registeredTitle, "JSON Viewer", "panel title passed in wParam (Linux order)");
     check(g_showPanelCalls == 1, "NPPM_DMM_SHOWPANEL called");
+    // GH linux#18: the panel must declare its reopen command exactly once,
+    // module "JSON Viewer" (= getName()) / cmdIndex 0 ("Show JSON Viewer"),
+    // or the host will not restore it after a restart.
+    check(g_panelInfoCount == 1, "NPPM_DMM_SETPANELINFO sent exactly once");
+    checkEq(g_panelInfoModule, "JSON Viewer", "restore module = getName()");
+    check(g_panelInfoCmdIndex == 0, "restore cmdIndex = 0 (Show JSON Viewer)");
 
     // Mount the panel in a window so rows can map/expand.
     GtkWidget *panelWin = gtk_window_new();

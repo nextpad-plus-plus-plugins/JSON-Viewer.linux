@@ -338,6 +338,13 @@ static bool ensurePanelRegistered() {
                      (intptr_t)sJsonPanel->root());
     if (h > 0) {
         g_panelHandle = h;
+        // Declare the reopen command so the host restores the panel after a
+        // restart (GH linux#18): module = getName() ("JSON Viewer"),
+        // cmdIndex 0 = "Show JSON Viewer". Hosts < 1.1.0 return 0 — ignored.
+        NppPanelInfo info;
+        info.moduleName = PLUGIN_NAME;
+        info.cmdIndex   = 0;
+        npp(NPPM_DMM_SETPANELINFO, (uintptr_t)g_panelHandle, (intptr_t)&info);
         return true;
     }
     showAlert("JSON Viewer", "The host rejected the panel registration.");

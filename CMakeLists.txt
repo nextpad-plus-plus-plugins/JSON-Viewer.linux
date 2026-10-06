@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 # Keep PROJECT_VERSION in sync with the macOS port's plugin version.
-project(NppJsonViewer VERSION 1.0.3 LANGUAGES CXX)
+project(NppJsonViewer VERSION 1.0.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
